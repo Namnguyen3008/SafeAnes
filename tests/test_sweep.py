@@ -28,6 +28,15 @@ from ui.monitor import SWEEP_GAP_SAMPLES, MonitorView, apply_sweep_gap   # noqa:
 APP = QApplication.instance() or QApplication(sys.argv[:1])
 
 
+def frame(ecg, resp, pleth=None, abp=None) -> dict:
+    """A write for the four-channel buffer; the extra channels get distinct ramps
+    so a column mix-up in the export would show."""
+    ecg = np.asarray(ecg, dtype=float)
+    return {"ecg": ecg, "resp": np.asarray(resp, dtype=float),
+            "pleth": ecg * 3 if pleth is None else pleth,
+            "abp": ecg * 4 if abp is None else abp}
+
+
 def filled_buffer(n_written: int) -> RingBuffer:
     """A buffer carrying a known ramp, wound forward to a chosen write index."""
     buffer = RingBuffer()
@@ -35,7 +44,7 @@ def filled_buffer(n_written: int) -> RingBuffer:
     for start in range(0, n_written, step):
         count = min(step, n_written - start)
         ramp = np.arange(start, start + count, dtype=float)
-        buffer.write({"ecg": ramp, "resp": -ramp})
+        buffer.write(frame(ramp, -ramp))
     return buffer
 
 
@@ -101,7 +110,7 @@ def test_cursor_advances_but_the_axis_never_moves():
 
     positions, axes = [], []
     for _ in range(6):
-        buffer.write({"ecg": np.ones(700), "resp": np.ones(700)})
+        buffer.write(frame(np.ones(700), np.ones(700)))
         view.refresh()
         positions.append(nan_runs(view.ecg_curve.yData)[0][0])
         axes.append(view.ecg_curve.xData.copy())
@@ -119,7 +128,7 @@ def test_cursor_wraps_and_starts_overwriting():
     view.refresh()
     before = nan_runs(view.ecg_curve.yData)[0][0]
 
-    buffer.write({"ecg": np.zeros(300), "resp": np.zeros(300)})
+    buffer.write(frame(np.zeros(300), np.zeros(300)))
     view.refresh()
     after = nan_runs(view.ecg_curve.yData)[0][0]
 
@@ -231,18 +240,20 @@ def test_export_writes_the_buffer():
     window.choose_export_path = lambda: path        # stand in for the file dialog
     try:
         for _ in range(20):
-            buffer.write({"ecg": np.arange(500.0), "resp": np.arange(500.0) * 2})
+            buffer.write(frame(np.arange(500.0), np.arange(500.0) * 2))
         assert window.export_buffer() == path
 
         with open(path, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
-        assert lines[0] == "time_s,ecg,resp"
+        assert lines[0] == "time_s,ecg,resp,pleth,abp"
         assert len(lines) == BUFFER_SIZE + 1
         assert "Exported 10000 samples" in window.controls.status_label.text()
 
         last = lines[-1].split(",")
         assert float(last[0]) == (BUFFER_SIZE - 1) / SAMPLE_RATE
         assert float(last[2]) == 2 * float(last[1])     # channels still aligned
+        assert float(last[3]) == 3 * float(last[1])
+        assert float(last[4]) == 4 * float(last[1])
     finally:
         window.close()
         if os.path.exists(path):

@@ -94,8 +94,8 @@ if MAC:
         info_plist={
             "CFBundleName": "ECG Simulator",
             "CFBundleDisplayName": "ECG Simulator",
-            "CFBundleShortVersionString": "1.0.0",
-            "CFBundleVersion": "1.0.0",
+            "CFBundleShortVersionString": "1.1.0",
+            "CFBundleVersion": "1.1.0",
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
         },

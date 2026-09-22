@@ -7,6 +7,7 @@ models can be unit-tested headlessly.  :class:`SignalGenerator` is a thin
 What each condition *looks like* lives in :mod:`core.pathology`; this file is
 about timing and signal assembly.  Signal chain per chunk (50 ms at 1 kHz):
 
+    ventricular beats -> Windkessel circulation -> arterial pressure, pleth
     beats (5-Gaussian McSharry) or a baseline override (VF, asystole)
         -> atrial baseline (f-waves, flutter sawtooth)
         -> respiratory baseline sway
@@ -29,6 +30,7 @@ import numpy as np
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from .buffer import RingBuffer
+from .hemodynamics import CPR_RATE, Circulation
 from .pathology import (  # noqa: F401  (re-exported for callers and tests)
     AFIB_BEAT,
     AFIB_JITTER,
@@ -94,6 +96,14 @@ MOTION_AMPLITUDE = 2.5    # mV; deliberately dwarfs the 1 mV R wave
 
 BEAT_LOG_LIMIT = 4096     # bounded: the engine may run for hours
 
+CHANNELS = ("ecg", "resp", "pleth", "abp")
+
+# Chest compressions
+CPR_ECG_MV = 0.8          # compression artifact: CPR can masquerade as a rhythm
+CPR_RESP_GAIN = 0.25      # thoracic impedance change per compression
+PLETH_RESP_GAIN = 0.05    # respiratory variation of the pleth baseline
+PLETH_MOTION_GAIN = 0.5   # motion is the leading cause of bad SpO2 readings
+
 # --- Electrical therapy ------------------------------------------------------
 SHOCK_ARTIFACT_S = 1.2       # amplifier saturation and recovery after a shock
 SHOCK_SPIKE_S = 0.02         # the discharge itself
@@ -130,6 +140,7 @@ class ScheduledBeat:
     b: np.ndarray
     theta: np.ndarray
     kind: str = "sinus"          # sinus | pvc | p | escape
+    committed: bool = False      # handed to the circulation; its pulse is now fixed
 
     @property
     def ectopic(self) -> bool:
@@ -163,6 +174,11 @@ class WaveformEngine:
         self._motion_pos = 0
         self._shock: np.ndarray | None = None
         self._shock_pos = 0
+
+        params = state.snapshot()
+        self.circulation = Circulation(self.fs, params.systolic, params.diastolic)
+        self._next_compression: float | None = None
+        self._compressions: list[float] = []
 
         self._rhythm = "Sinus"
         self._beat_index = 0           # position within a repeating conduction cycle
@@ -500,6 +516,46 @@ class WaveformEngine:
         self._rhythm = new_rhythm
         return outcome, new_rhythm
 
+    # -- mechanics ------------------------------------------------------------
+    def _commit_beats(self, until: float, perfusion: float) -> None:
+        """Hand each ventricular beat to the circulation once its R wave is due.
+
+        Beats are committed lazily - only when the chunk reaches them - because
+        a PVC or a shock can still delete a beat that is merely scheduled.  A
+        beat committed early would leave a phantom pulse behind.
+        """
+        for beat in sorted(self._scheduled, key=lambda b: b.r_time):
+            if beat.r_time >= until:
+                break
+            if beat.committed or not beat.conducts:
+                continue
+            beat.committed = True
+            self.circulation.beat(beat.r_time, perfusion, ectopic=beat.ectopic)
+
+    def _schedule_compressions(self, t: np.ndarray, active: bool) -> None:
+        if not active:
+            self._next_compression = None
+        else:
+            if self._next_compression is None:
+                self._next_compression = float(t[0])
+            period = 60.0 / CPR_RATE
+            while self._next_compression <= t[-1]:
+                self._compressions.append(self._next_compression)
+                self.circulation.compress(self._next_compression)
+                self._next_compression += period
+        self._compressions = [c for c in self._compressions if c > t[0] - 0.6]
+
+    def _compression_artifact(self, t: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """What each compression does to the ECG and to the impedance signal."""
+        ecg = np.zeros(t.size)
+        resp = np.zeros(t.size)
+        for c in self._compressions:
+            tau = t - c
+            ecg += CPR_ECG_MV * (np.exp(-0.5 * ((tau - 0.07) / 0.045) ** 2)
+                                 - 0.35 * np.exp(-0.5 * ((tau - 0.22) / 0.07) ** 2))
+            resp += CPR_RESP_GAIN * np.exp(-0.5 * ((tau - 0.10) / 0.06) ** 2)
+        return ecg, resp
+
     # -- artifacts ------------------------------------------------------------
     def _build_motion(self) -> np.ndarray:
         """A detrended, Hann-enveloped random walk: violent, then back to baseline."""
@@ -525,7 +581,7 @@ class WaveformEngine:
 
     # -- main entry point -----------------------------------------------------
     def next_chunk(self, n: int = CHUNK_SAMPLES) -> dict[str, np.ndarray]:
-        """Produce the next ``n`` samples of ECG and respiration."""
+        """Produce the next ``n`` samples of every channel in :data:`CHANNELS`."""
         t0 = self.elapsed
         t = t0 + np.arange(n, dtype=np.float64) / self.fs
 
@@ -541,6 +597,8 @@ class WaveformEngine:
         rhythm = RHYTHMS.get(params.cardiac_rhythm, RHYTHMS["Sinus"])
         self._resp_spec = RESP_SPECS.get(params.resp_pattern, RESP_SPECS["Normal"])
         resp_hz = self.respiratory_rate_hz(params)
+        # No-op unless the targets moved; recalibration takes a few milliseconds.
+        self.circulation.calibrate(params.systolic, params.diastolic)
 
         # One-shot events, consumed exactly once each.
         if self.state.consume_pvc():
@@ -551,6 +609,8 @@ class WaveformEngine:
 
         self._schedule_until(t[-1] + LOOKAHEAD_S, params.heart_rate, resp_hz,
                              params.cardiac_rhythm)
+        self._commit_beats(t[-1] + 1.0 / self.fs, rhythm.perfusion)
+        self._schedule_compressions(t, params.cpr_active)
         self._prune(t0)
 
         # Respiration channel, phase-continuous across chunks.
@@ -588,13 +648,26 @@ class WaveformEngine:
         motion = self._next_motion(n)
         ecg += motion
         ecg += self._next_shock(n)      # discharge artifact and amplifier recovery
+
+        # Circulation: pressure and pleth are driven by the beats committed above.
+        abp, pleth = self.circulation.render(t)
+        # Breathing modulates the pleth only through the blood it moves, so the
+        # variation scales with perfusion: a pulseless patient has a flat pleth.
+        flow = max(rhythm.perfusion, 0.3 if params.cpr_active else 0.0)
+        pleth = pleth + PLETH_RESP_GAIN * flow * resp + PLETH_MOTION_GAIN * motion
+
+        if self._compressions:
+            cpr_ecg, cpr_resp = self._compression_artifact(t)
+            ecg += cpr_ecg
+            resp = resp + cpr_resp
+
         # Movement shakes the chest belt too, just less than the ECG electrodes.
         resp = resp + 0.4 * motion
         if params.gaussian_sigma:
             resp = resp + self.rng.normal(0.0, 0.3 * params.gaussian_sigma, n)
 
         self._n_emitted += n
-        return {"ecg": ecg, "resp": resp}
+        return {"ecg": ecg, "resp": resp, "pleth": pleth, "abp": abp}
 
 
 class SignalGenerator(QThread):

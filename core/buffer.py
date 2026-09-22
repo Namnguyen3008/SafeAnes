@@ -19,7 +19,7 @@ import numpy as np
 
 from .state import BUFFER_SIZE, SAMPLE_RATE
 
-DEFAULT_CHANNELS = ("ecg", "resp")
+DEFAULT_CHANNELS = ("ecg", "resp", "pleth", "abp")
 
 
 class RingBuffer:

@@ -31,6 +31,9 @@ RR_RANGE = (8.0, 30.0)          # breaths per minute
 MAINS_RANGE = (0.0, 0.5)        # mV
 BASELINE_RANGE = (0.0, 0.5)     # mV
 GAUSSIAN_RANGE = (0.0, 0.2)     # mV (sigma)
+SPO2_RANGE = (60.0, 100.0)      # % target saturation
+SYSTOLIC_RANGE = (70.0, 220.0)  # mmHg, baseline the circulation is calibrated to
+DIASTOLIC_RANGE = (30.0, 130.0) # mmHg
 
 MAINS_FREQUENCY = 50.0          # Hz
 BASELINE_FREQUENCY = 0.5        # Hz
@@ -62,12 +65,15 @@ _LIMITS = {
     "mains_amplitude": MAINS_RANGE,
     "baseline_amplitude": BASELINE_RANGE,
     "gaussian_sigma": GAUSSIAN_RANGE,
+    "spo2_target": SPO2_RANGE,
+    "systolic": SYSTOLIC_RANGE,
+    "diastolic": DIASTOLIC_RANGE,
 }
 _CHOICES = {
     "cardiac_rhythm": CARDIAC_RHYTHMS,
     "resp_pattern": RESP_PATTERNS,
 }
-_FLAGS = ("alarm_enabled",)      # plain booleans: neither clamped nor enumerated
+_FLAGS = ("alarm_enabled", "cpr_active")   # plain booleans: neither clamped nor enumerated
 
 
 def _clamp(value: float, limits: tuple[float, float]) -> float:
@@ -87,6 +93,10 @@ class StateSnapshot:
     cardiac_rhythm: CardiacRhythm = "Sinus"
     resp_pattern: RespPattern = "Normal"
     alarm_enabled: bool = True
+    spo2_target: float = 98.0
+    systolic: float = 120.0
+    diastolic: float = 80.0
+    cpr_active: bool = False
 
 
 class SimulationState:

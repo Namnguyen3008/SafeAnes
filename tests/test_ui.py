@@ -252,6 +252,27 @@ def test_panel_scrolls_rather_than_clipping_on_a_short_window():
         window.close()
 
 
+def test_no_tab_is_wider_than_the_panel():
+    """Qt polishes a tab's widgets the first time it is shown, which can widen
+    them - so this visits every tab before measuring, as a user would."""
+    window = MainWindow()
+    window.resize(1480, 900)
+    window.show()
+    APP.processEvents()
+    try:
+        tabs = window.controls.tabs
+        viewport = window.controls_pane.viewport().width()
+        for index in range(tabs.count()):
+            tabs.setCurrentIndex(index)
+            APP.processEvents()
+            needed = window.controls.minimumSizeHint().width()
+            assert needed <= viewport, (
+                f"'{tabs.tabText(index)}' needs {needed}px in a {viewport}px panel")
+        assert window.controls.width() <= viewport, "panel content is clipped"
+    finally:
+        window.close()
+
+
 # --- pathology summary ------------------------------------------------------
 def test_summary_describes_the_current_selection():
     panel = ControlPanel()

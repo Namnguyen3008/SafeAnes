@@ -97,10 +97,12 @@ ISCHEMIA_BEAT = BeatMorphology.of(
 )
 
 # Hyperkalaemia: tall narrow "peaked" T waves, a widened QRS and a P wave that
-# flattens out as the potassium climbs.
+# flattens out as the potassium climbs.  The R wave is widened (~42 ms FWHM
+# against ~24 ms in sinus) but kept steeper than the T: at b=0.025 the peaked T
+# carried more slope energy than the QRS, and a rate meter counted it as a beat.
 HYPERKALEMIA_BEAT = BeatMorphology.of(
     a=[0.03, -0.15, 1.00, -0.15, 0.85],
-    b=[0.04, 0.020, 0.025, 0.025, 0.028],
+    b=[0.04, 0.020, 0.018, 0.025, 0.028],
     theta=[-0.20, -0.06, 0.00, 0.06, 0.26],
 )
 
@@ -185,6 +187,9 @@ class RhythmSpec:
     scheduler: str = "regular"
     baseline: str = ""                           # extra or replacement baseline
     note: str = ""
+    # Mechanical effectiveness of each ventricular beat, 0..1.  Scales stroke
+    # volume, so it is what makes VF pulseless and VT hypotensive.
+    perfusion: float = 1.0
 
 
 AFIB_JITTER = (0.7, 1.3)          # "irregularly irregular" R-R multiplier
@@ -209,16 +214,16 @@ RHYTHMS: dict[str, RhythmSpec] = {
     # -- atrial ------------------------------------------------------------
     "AFib": RhythmSpec(
         AFIB_BEAT, jitter=AFIB_JITTER, baseline="afib",
-        note="No P waves, fibrillatory baseline, irregularly irregular"),
+        note="No P waves, fibrillatory baseline, irregularly irregular", perfusion=0.85),
     "Atrial Flutter": RhythmSpec(
         FLUTTER_BEAT, rate_bpm=150.0, baseline="flutter",
-        note="Sawtooth F waves at 300/min, 2:1 conduction"),
+        note="Sawtooth F waves at 300/min, 2:1 conduction", perfusion=0.85),
     "SVT": RhythmSpec(
         SVT_BEAT, rate_bpm=180.0,
-        note="Narrow-complex tachycardia, P waves not visible"),
+        note="Narrow-complex tachycardia, P waves not visible", perfusion=0.85),
     "Junctional": RhythmSpec(
         JUNCTIONAL_BEAT, rate_bpm=48.0,
-        note="AV nodal escape with a retrograde P wave"),
+        note="AV nodal escape with a retrograde P wave", perfusion=0.85),
 
     # -- conduction blocks --------------------------------------------------
     "1st Degree AV Block": RhythmSpec(
@@ -232,7 +237,7 @@ RHYTHMS: dict[str, RhythmSpec] = {
         note="Constant PR, then a QRS drops without warning"),
     "3rd Degree AV Block": RhythmSpec(
         ESCAPE_BEAT, scheduler="complete_block",
-        note="Complete AV dissociation: independent P and QRS trains"),
+        note="Complete AV dissociation: independent P and QRS trains", perfusion=0.85),
 
     # -- ventricular --------------------------------------------------------
     "PVC Bigeminy": RhythmSpec(
@@ -240,35 +245,35 @@ RHYTHMS: dict[str, RhythmSpec] = {
         note="Every sinus beat followed by a PVC"),
     "V-Tach": RhythmSpec(
         VTACH_BEAT, rate_bpm=VTACH_RATE,
-        note="Broad monomorphic complexes at a fixed fast rate"),
+        note="Broad monomorphic complexes at a fixed fast rate", perfusion=0.35),
     "Torsades de Pointes": RhythmSpec(
         VTACH_BEAT, rate_bpm=TORSADES_RATE, scheduler="torsades",
-        note="Polymorphic VT twisting about the isoelectric line"),
+        note="Polymorphic VT twisting about the isoelectric line", perfusion=0.15),
     "V-Fib": RhythmSpec(
         SINUS, scheduler="none", baseline="vfib",
-        note="Chaotic disorganised activity, no identifiable complexes"),
+        note="Chaotic disorganised activity, no identifiable complexes", perfusion=0.0),
     "Idioventricular": RhythmSpec(
         IDIOVENTRICULAR_BEAT, rate_bpm=34.0,
-        note="Slow wide ventricular escape rhythm"),
+        note="Slow wide ventricular escape rhythm", perfusion=0.6),
     "Asystole": RhythmSpec(
         SINUS, scheduler="none", baseline="flat",
-        note="No electrical activity"),
+        note="No electrical activity", perfusion=0.0),
 
     # -- ischaemia and metabolic -------------------------------------------
     "STEMI": RhythmSpec(
         STEMI_BEAT, rsa=True,
-        note="ST elevation merging into a hyperacute T wave"),
+        note="ST elevation merging into a hyperacute T wave", perfusion=0.75),
     "Ischemia (ST Dep.)": RhythmSpec(
         ISCHEMIA_BEAT, rsa=True,
-        note="ST depression with T wave inversion"),
+        note="ST depression with T wave inversion", perfusion=0.9),
     "Hyperkalemia": RhythmSpec(
         HYPERKALEMIA_BEAT, rsa=True,
-        note="Peaked T waves, widened QRS, flattened P"),
+        note="Peaked T waves, widened QRS, flattened P", perfusion=0.9),
 
     # -- device -------------------------------------------------------------
     "Paced": RhythmSpec(
         PACED_BEAT, rate_bpm=70.0,
-        note="Pacing spike followed by a wide paced complex"),
+        note="Pacing spike followed by a wide paced complex", perfusion=0.9),
 }
 
 CARDIAC_RHYTHMS = tuple(RHYTHMS)
