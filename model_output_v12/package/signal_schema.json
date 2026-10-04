@@ -1,0 +1,65 @@
+{
+  "waveforms": {
+    "capno": {
+      "hz": 62.5,
+      "seconds": 60,
+      "optional": false
+    },
+    "awp": {
+      "hz": 62.5,
+      "seconds": 60,
+      "optional": false
+    },
+    "ppg": {
+      "hz": 125.0,
+      "seconds": 60,
+      "optional": false
+    },
+    "flow": {
+      "hz": 62.5,
+      "seconds": 60,
+      "optional": true
+    },
+    "resp": {
+      "hz": 62.5,
+      "seconds": 60,
+      "optional": true
+    }
+  },
+  "numeric_features": [
+    "SPO2",
+    "ETCO2",
+    "RR_CO2",
+    "TV",
+    "MV",
+    "PIP",
+    "PEEP",
+    "PPLAT",
+    "MAWP",
+    "FIO2",
+    "COMPLIANCE",
+    "VENT_LEAK",
+    "SET_FIO2",
+    "SET_TV",
+    "SET_PIP",
+    "SET_RR",
+    "HR",
+    "MAC"
+  ],
+  "numeric_history_sec": 600,
+  "static_features": [
+    "age",
+    "bmi",
+    "asa",
+    "sex_male",
+    "weight",
+    "height",
+    "emop"
+  ],
+  "outputs": [
+    "hypoxemia_1m",
+    "hypoxemia_3m",
+    "hypoxemia_5m",
+    "ventilation_loss_pattern"
+  ]
+}

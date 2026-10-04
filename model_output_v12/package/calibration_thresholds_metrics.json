@@ -1,0 +1,53 @@
+{
+  "status": "CALIBRATION_SUCCESS",
+  "temperature": {
+    "1": 0.27970191836357117,
+    "3": 0.27119407057762146,
+    "5": 0.22705775499343872
+  },
+  "threshold_5m": 0.05112497268523094,
+  "val_event_5m": {
+    "event_sensitivity": 0.07142857142857142,
+    "detected_events": 1,
+    "total_events": 14,
+    "false_alerts": 23,
+    "monitored_hours": 41.43333333333334,
+    "false_alerts_per_hour": 0.5551086082059533
+  },
+  "val_window": {
+    "1": {
+      "brier": 0.0005922453326210419,
+      "auroc": 0.6663963781336577,
+      "auprc": 0.15052992555949862
+    },
+    "3": {
+      "brier": 0.002701365197194208,
+      "auroc": 0.6103645592985694,
+      "auprc": 0.12589158872118308
+    },
+    "5": {
+      "brier": 0.004875472337987177,
+      "auroc": 0.864473148901546,
+      "auprc": 0.3446655287760555
+    }
+  },
+  "test_window": {
+    "1": {
+      "brier": 1.7265642487128063e-05
+    },
+    "3": {
+      "brier": 0.0004979133421763759
+    },
+    "5": {
+      "brier": 0.0017563563095224159
+    }
+  },
+  "test_event_5m": {
+    "event_sensitivity": 0.0,
+    "detected_events": 0,
+    "total_events": 1,
+    "false_alerts": 21,
+    "monitored_hours": 41.18333333333333,
+    "false_alerts_per_hour": 0.509915014164306
+  }
+}

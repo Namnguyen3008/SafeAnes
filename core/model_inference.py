@@ -69,15 +69,32 @@ class ModelPaths:
         project_root = Path(__file__).resolve().parents[1]
         workspace_root = project_root.parent
         downloads_root = workspace_root.parent
-        source_default = downloads_root / "uc4" / "safeanes"
+
+        source_candidates = (
+            project_root / "safeanes",
+            workspace_root / "safeanes",
+            downloads_root / "uc4" / "safeanes",
+        )
+        source_dir = next((p for p in source_candidates if p.is_dir()), source_candidates[0])
+
+        uc04_candidates = (
+            project_root / "model_output_v12" / "package",
+            workspace_root / "model_output_v12" / "package",
+            workspace_root / "UC04" / "package_extracted",
+        )
+        uc04_dir = next((p for p in uc04_candidates if p.is_dir()), uc04_candidates[0])
+
+        uc05_candidates = (
+            project_root / "model_output_v12" / "package",
+            workspace_root / "model_output_v12" / "package",
+            workspace_root / "UC05" / "package_extracted",
+        )
+        uc05_dir = next((p for p in uc05_candidates if p.is_dir()), uc05_candidates[0])
+
         return cls(
-            uc04_artifact_dir=Path(os.environ.get(
-                "SAFEANES_UC04_ARTIFACT_DIR", workspace_root / "UC04" / "package_extracted"
-            )),
-            uc05_artifact_dir=Path(os.environ.get(
-                "SAFEANES_UC05_ARTIFACT_DIR", workspace_root / "UC05" / "package_extracted"
-            )),
-            source_dir=Path(os.environ.get("SAFEANES_MODEL_SOURCE_DIR", source_default)),
+            uc04_artifact_dir=Path(os.environ.get("SAFEANES_UC04_ARTIFACT_DIR", uc04_dir)),
+            uc05_artifact_dir=Path(os.environ.get("SAFEANES_UC05_ARTIFACT_DIR", uc05_dir)),
+            source_dir=Path(os.environ.get("SAFEANES_MODEL_SOURCE_DIR", source_dir)),
         )
 
 
