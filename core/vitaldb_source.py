@@ -13,7 +13,16 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import urllib.request
 from urllib.request import Request, urlopen
+
+_global_opener = urllib.request.build_opener()
+_global_opener.addheaders = [(
+    "User-Agent",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)]
+urllib.request.install_opener(_global_opener)
+
 
 import numpy as np
 
