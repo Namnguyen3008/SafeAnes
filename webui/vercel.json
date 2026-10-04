@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://safeanes-web-backend.onrender.com/api/:path*"
+    }
+  ]
+}
