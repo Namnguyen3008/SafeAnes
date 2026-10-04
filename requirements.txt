@@ -1,7 +1,8 @@
-# Verified against Python 3.14.7 on Windows.
-PyQt6>=6.6
-pyqtgraph>=0.13
+# Verified against Python 3.12+ on Render & Windows.
 numpy>=1.25
 scipy>=1.10
+pandas>=2.0
+vitaldb>=1.4.0
 fastapi[standard]==0.142.2
 httpx>=0.27,<1
+uvicorn>=0.30
