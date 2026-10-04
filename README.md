@@ -1,13 +1,15 @@
 # ECG Simulator
 
-A real-time patient monitor driven by a physiological model. It generates ECG,
-pulse oximetry, arterial pressure and respiration — 19 cardiac rhythms, 6
-breathing patterns — and reads its own numerics off those waveforms the way a
-bedside monitor does. Arrhythmias, CPR, defibrillation and scripted clinical
-scenarios all play out across every channel at once.
+A real-time patient monitor driven by a physiological model. Synthetic mode
+generates ECG, pulse oximetry, arterial pressure and respiration — 19 cardiac
+rhythms, 6 breathing patterns — and reads its numerics off those waveforms.
+Optional research replay displays de-identified VitalDB cases on their original
+case-time axis and runs the available SafeAnes UC04/UC05 packages.
 
 Built for teaching, demos, and testing signal-processing code against known
-input. Nothing here comes from a real patient.
+input. Synthetic mode uses no patient data. Replay mode is an opt-in view of
+de-identified VitalDB recordings; it is a research prototype, not a clinical
+monitor.
 
 ![The monitor](docs/monitor.png)
 
@@ -33,6 +35,9 @@ first time:
 - **Windows** — SmartScreen shows "Windows protected your PC". Choose
   **More info → Run anyway**.
 
+The release binaries focus on synthetic mode. Real-case replay needs the source
+checkout, optional packages below, and local UC04/UC05 model files.
+
 ## Run from source
 
 ```bash
@@ -43,10 +48,21 @@ python main.py
 Python 3.10 or newer. Developed against Python 3.14 with PyQt6 6.11,
 pyqtgraph 0.14, numpy 2.5 and scipy 1.18 (scipy is only needed for the tests).
 
+To enable real-case replay and local SafeAnes inference, install the optional
+dependencies as well:
+
+```bash
+pip install -r requirements-replay.txt
+```
+
+UC04 and UC05 weights and their source wrappers are not bundled. By default the
+app looks for `UC04/package_extracted`, `UC05/package_extracted`, and
+`uc4/safeanes` beside this repository. Set `SAFEANES_UC04_ARTIFACT_DIR`,
+`SAFEANES_UC05_ARTIFACT_DIR`, or `SAFEANES_MODEL_SOURCE_DIR` to use other paths.
+
 ## The display
 
-Four waveform rows, each beside the number it produces — the layout every
-bedside monitor uses:
+Synthetic mode shows four waveform rows, each beside the number it produces:
 
 | Row | Waveform | Numeric |
 |---|---|---|
@@ -55,7 +71,8 @@ bedside monitor uses:
 | **ART** | Arterial line pressure | Systolic / diastolic (mean) |
 | **RESP** | Thoracic impedance | Respiratory rate |
 
-The numbers are **measured from the waveforms, not echoed from the controls.**
+In synthetic mode, the numbers are **measured from the waveforms, not echoed
+from the controls.**
 V-Tach reads 160 whatever the heart-rate slider says, AFib's rate wanders beat to
 beat, a motion artifact can briefly fool the rate meter, and in VF the heart
 rate reads `---` because there is nothing countable. When a pulse is lost, the
@@ -67,7 +84,7 @@ colour vision.
 
 ## Using it
 
-The left panel has six tabs. `Ctrl+H` (or `F9`) collapses it to give the
+The left panel has seven tabs. `Ctrl+H` (or `F9`) collapses it to give the
 waveforms the full width; the thin rail on its edge brings it back.
 
 **Patient** — the ECG rhythm, the breathing pattern, and the patient's
@@ -90,6 +107,17 @@ and **Acknowledge**, which stops them flashing for a minute.
 
 **Log** — a timestamped record of everything that happened, from whichever
 source: a control, a scenario step, a shock, an alarm raised or cleared.
+
+**Replay** — load an adult VitalDB case, play or pause it, seek through case
+time, and change playback speed. Replay shows recorded numerics and adds CO₂
+and airway-pressure traces where those tracks exist. The track-status panel
+shows missing or unsupported signals; unavailable respiration inputs stay
+blank. Choose **Use Synthetic** to return to the generated monitor.
+
+UC04 and UC05 outputs use the released package wrappers and weights when their
+input gates pass. The display labels scores with their package thresholds and
+validation notes. These outputs are **research only**; they are not clinical
+alarms, diagnoses, or treatment advice. The packages have limited validation.
 
 | Key | Action |
 |---|---|
@@ -233,8 +261,9 @@ prominence test that separates fibrillation from irregular-but-organised
 rhythms like AFib, beat-by-beat pressure measurement, and a breath detector
 with a 30-second window so even agonal breathing at 6 a minute is counted.
 
-Generation and display run on separate threads with a ring buffer between them,
-so a slow repaint can never stall the sample clock:
+Synthetic generation and display run on separate threads with a ring buffer
+between them. Replay writes all available waveforms to the same monitor buffer
+at shared case timestamps:
 
 ```
 SignalGenerator (QThread) --writes--> RingBuffer <--reads-- MonitorView
@@ -250,6 +279,10 @@ monitor.
 main.py               entry point
 core/state.py         thread-safe parameter state and one-shot event flags
 core/buffer.py        fixed-size multi-channel ring buffer
+core/data_sources.py  aligned waveform and numeric timelines
+core/vitaldb_source.py VitalDB case and track loading with local caching
+core/replay.py        synchronized case-time replay
+core/model_inference.py UC04/UC05 input gates and package inference
 core/pathology.py     catalogue: morphologies, rhythms, breathing, therapy
 core/generator.py     waveform engine and producer thread
 core/hemodynamics.py  Windkessel circulation, arterial pressure, pleth
@@ -260,6 +293,7 @@ ui/theme.py           colours, type and the stylesheet
 ui/icons.py           vector icon set, drawn in code
 ui/widgets.py         sliders, switches, tiles, alarm banner, event log
 ui/monitor.py         sweeping waveforms and numeric tiles
+ui/replay_panel.py    VitalDB loading, replay controls and research outputs
 ui/main_window.py     control panel, header, and the wiring between them
 ```
 
@@ -269,9 +303,11 @@ automatically.
 
 ## Development
 
-207 tests across nine suites. They assert on measurements taken back out of the
+Tests assert on measurements taken back out of the
 generated signal — R-R intervals, FFT bins, QRS widths, pressures, pulse timing —
 rather than on the fact that numbers came out.
+
+Install the test and replay dependencies with `pip install -r requirements-dev.txt`.
 
 ```bash
 python tests/test_core.py         # ring buffer, state
@@ -283,6 +319,7 @@ python tests/test_rhythms.py      # the full catalogue
 python tests/test_therapy.py      # defibrillation, cardioversion, rhythm alarms
 python tests/test_physiology.py   # circulation, measured vitals, alarms, CPR, scenarios
 python tests/test_monitor_ui.py   # numerics on screen, display controls, the event log
+python -m pytest tests/test_data_sources.py tests/test_vitaldb_source.py tests/test_replay.py tests/test_model_inference.py tests/test_replay_panel.py tests/test_real_monitor.py
 ```
 
 They also run under `pytest`. The GUI suites need a real window server; the
@@ -311,8 +348,8 @@ binary has to be built on that platform — the GitHub Actions workflow in
 
 ## Not a medical device
 
-Every waveform here is synthetic and hand-parameterised, and every model is a
-simplification. Nothing is derived from patient data or validated against any
-clinical standard. It must not be used for diagnosis, for training that
-substitutes for clinical instruction, or to test equipment intended for
+Synthetic waveforms are hand-parameterised simplifications. Replay uses
+de-identified VitalDB recordings, and the bundled SafeAnes packages are not
+validated for clinical use. Nothing in this application must be used for
+diagnosis, treatment, clinical training, or testing equipment intended for
 patient care.

@@ -17,6 +17,7 @@ reason.
 
 from __future__ import annotations
 
+import math
 import os
 import time
 from datetime import datetime
@@ -43,6 +44,9 @@ from PyQt6.QtWidgets import (
 )
 
 from core.alarms import LIMIT_RANGES, AlarmLimits, AlarmTracker, by_parameter, evaluate
+from core.buffer import RingBuffer
+from core.data_sources import PatientTimeline
+from core.model_inference import SafeAnesInference
 from core.pathology import (
     RESP_SPECS,
     RHYTHMS,
@@ -53,6 +57,7 @@ from core.pathology import (
     URGENCY_URGENT,
     therapy_for,
 )
+from core.replay import REPLAY_CHANNELS, ReplaySession, sanitize_recorded_vitals
 from core.scenarios import SCENARIOS, ScenarioPlayer
 from core.state import (
     BASELINE_RANGE,
@@ -71,6 +76,7 @@ from core.vitals import VitalsAnalyzer
 
 from . import icons
 from .monitor import ECG_COLOR, GAINS, RESP_COLOR, MonitorView
+from .replay_panel import InferenceWorker, RealReplayPanel
 from .theme import (
     ACCENT,
     DANGER,
@@ -81,7 +87,7 @@ from .theme import (
     numeric_font,
     ui_font,
 )
-from .widgets import (  # noqa: F401  (LabeledSlider re-exported for callers and tests)
+from .widgets import (
     AlarmBanner,
     Card,
     EventLog,
@@ -156,7 +162,7 @@ class ControlPanel(QWidget):
         layout.setSpacing(8)
 
         self.tabs = QTabWidget()
-        self.tabs.setUsesScrollButtons(False)
+        self.tabs.setUsesScrollButtons(True)
         self.tabs.setElideMode(Qt.TextElideMode.ElideNone)
         self.tabs.setDocumentMode(True)
         self.tabs.addTab(self._patient_tab(defaults), "Patient")
@@ -259,7 +265,8 @@ class ControlPanel(QWidget):
         self.motion_button = QPushButton("  Motion artifact")
         self.motion_button.setIcon(icons.icon("activity", WARNING, 16))
         self.motion_button.clicked.connect(self.motion_requested)
-        self.pvc_button = QPushButton("  Premature ventricular contraction")
+        self.pvc_button = QPushButton("  PVC")
+        self.pvc_button.setAccessibleName("Premature ventricular contraction")
         self.pvc_button.setIcon(icons.icon("heart", DANGER, 16))
         self.pvc_button.setToolTip("One PVC, coupled to the preceding beat")
         self.pvc_button.clicked.connect(self.pvc_requested)
@@ -285,13 +292,15 @@ class ControlPanel(QWidget):
         page, layout = self._page()
 
         shock = Card("Electrical therapy", "bolt")
-        self.defib_button = QPushButton("  Defibrillate  ·  unsynchronised", objectName="danger")
+        self.defib_button = QPushButton("  Defib · unsync", objectName="danger")
+        self.defib_button.setAccessibleName("Defibrillate, unsynchronised")
         self.defib_button.setIcon(icons.icon("bolt", TEXT, 17))
         self.defib_button.setToolTip(
             "Unsynchronised shock - for pulseless VF/VT. "
             "On an organised rhythm this can land on the T wave and cause VF.")
         self.defib_button.clicked.connect(lambda: self.shock_requested.emit(THERAPY_DEFIB))
-        self.cardiovert_button = QPushButton("  Cardiovert  ·  synchronised", objectName="warning")
+        self.cardiovert_button = QPushButton("  Cardiovert · sync", objectName="warning")
+        self.cardiovert_button.setAccessibleName("Cardiovert, synchronised")
         self.cardiovert_button.setIcon(icons.icon("sync", TEXT, 17))
         self.cardiovert_button.setToolTip(
             "Synchronised shock - timed to the R wave. "
@@ -671,8 +680,272 @@ class MainWindow(QMainWindow):
         self._seen: dict[str, object] = {}
         # Swapped out in tests so the export path can be supplied without a dialog.
         self.choose_export_path = self._ask_export_path
+        self._init_real_replay()
 
     # -- header -----------------------------------------------------------------
+    def _init_real_replay(self) -> None:
+        self.real_replay_panel = RealReplayPanel()
+        self.controls.tabs.setUsesScrollButtons(True)
+        self.replay_tab_index = self.controls.tabs.addTab(self.real_replay_panel, "Replay")
+        self.controls.tabs.setTabToolTip(
+            self.replay_tab_index,
+            "Replay de-identified VitalDB cases with UC04/UC05 research outputs",
+        )
+        self._synthetic_buffer: RingBuffer | None = None
+        self._replay_buffer: RingBuffer | None = None
+        self._replay_timeline: PatientTimeline | None = None
+        self._replay_session: ReplaySession | None = None
+        self._replay_generation = 0
+        self._last_inference_stride = -1
+        self._inference_runner = SafeAnesInference()
+        self._inference_workers: list[InferenceWorker] = []
+
+        self._replay_pump_timer = QTimer(self)
+        self._replay_pump_timer.setInterval(25)
+        self._replay_pump_timer.timeout.connect(self._pump_replay)
+
+        panel = self.real_replay_panel
+        panel.timeline_loaded.connect(self._on_replay_loaded)
+        panel.play_requested.connect(self._on_replay_play)
+        panel.pause_requested.connect(self._on_replay_pause)
+        panel.seek_requested.connect(self._on_replay_seek)
+        panel.speed_requested.connect(self._on_replay_speed)
+        panel.synthetic_requested.connect(self._on_synthetic_requested)
+
+    def _on_replay_loaded(self, timeline: PatientTimeline) -> None:
+        if self.player is not None and self.player.running:
+            self.stop_scenario()
+
+        self._replay_generation += 1
+        self._last_inference_stride = -1
+        self._replay_timeline = timeline
+        self._replay_buffer = RingBuffer(
+            capacity=self.monitor.n_samples,
+            channels=REPLAY_CHANNELS,
+            sample_rate=self.monitor.sample_rate,
+        )
+        self._replay_session = ReplaySession(timeline, self._replay_buffer)
+        self.monitor.attach(self._replay_buffer)
+        self.monitor.set_replay_mode(True)
+        self.monitor.set_replay_display_ranges(timeline)
+        self.monitor.clear_vitals()
+        self.monitor.start()
+
+        for index in range(5):
+            self.controls.tabs.setTabEnabled(index, False)
+        self.controls.tabs.setTabEnabled(5, True)
+        self.controls.tabs.setTabEnabled(self.replay_tab_index, True)
+        self.controls.tabs.setCurrentIndex(self.replay_tab_index)
+
+        self.alarm_banner.hide()
+        self._alarm_timer.stop()
+        self.alarm_tracker = AlarmTracker()
+        self.physiological_alarms = []
+        self.controls.active_list.clear()
+        self.controls.active_list.addItem("Clinical alarms are disabled during replay.")
+        self.controls.set_status(f"Real VitalDB replay active · case {timeline.case_id}")
+        self.real_replay_panel.set_predictions(())
+        self.real_replay_panel.set_playing(False)
+        self.real_replay_panel.set_position(0.0, timeline.duration_sec)
+        self._replay_pump_timer.start()
+        self._vitals_timer.start(VITALS_MS)
+        self._refresh_real_replay()
+
+    def _on_synthetic_requested(self) -> None:
+        if self._replay_session is None:
+            self.real_replay_panel.source_status_label.setText(
+                "Synthetic monitor active. Load a case to switch to real replay."
+            )
+            return
+
+        self._replay_generation += 1
+        self._replay_pump_timer.stop()
+        self._replay_session.pause()
+        self._replay_session = None
+        self._replay_timeline = None
+        self._replay_buffer = None
+        self.real_replay_panel.set_playing(False)
+        self.real_replay_panel.set_predictions(())
+        self.real_replay_panel.source_status_label.setText(
+            "Synthetic monitor active. Load a case to switch to real replay."
+        )
+
+        if self._synthetic_buffer is not None:
+            self._buffer = self._synthetic_buffer
+            self.monitor.attach(self._synthetic_buffer)
+        self.monitor.set_replay_mode(False)
+        self.monitor.clear_vitals()
+        self.alarm_banner.show()
+        self._alarm_timer.start(ALARM_FLASH_MS)
+        for index in range(5):
+            self.controls.tabs.setTabEnabled(index, True)
+        self.controls.tabs.setTabEnabled(5, True)
+        self.controls.tabs.setCurrentIndex(0)
+        self.controls.set_status("Synthetic monitor active.")
+        self.alarm_tracker = AlarmTracker()
+        self.physiological_alarms = []
+        self._vitals_timer.start(VITALS_MS)
+        self.refresh_vitals()
+        self._refresh_alarm()
+
+    def _on_replay_play(self) -> None:
+        if self._replay_session is None:
+            return
+        self._replay_session.play()
+        self.real_replay_panel.set_playing(self._replay_session.playing)
+        self._refresh_real_replay()
+
+    def _on_replay_pause(self) -> None:
+        if self._replay_session is None:
+            return
+        self._replay_session.pause()
+        self.real_replay_panel.set_playing(False)
+        self._refresh_real_replay()
+
+    def _on_replay_seek(self, position_sec: float) -> None:
+        if self._replay_session is None:
+            return
+        self._replay_generation += 1
+        self._last_inference_stride = -1
+        self._replay_session.seek(position_sec)
+        self._refresh_real_replay()
+
+    def _on_replay_speed(self, speed: float) -> None:
+        if self._replay_session is None:
+            return
+        self._replay_session.set_speed(speed)
+        self._refresh_real_replay()
+
+    def _pump_replay(self) -> None:
+        session = self._replay_session
+        if session is None:
+            self._replay_pump_timer.stop()
+            return
+        session.advance()
+        if not session.playing:
+            self.real_replay_panel.set_playing(False)
+            self._refresh_real_replay()
+
+    def _numeric_at(self, name: str, position_sec: float) -> float | None:
+        """Return the latest recorded numeric, held for at most five seconds."""
+        if self._replay_timeline is None or not math.isfinite(position_sec) or position_sec < 0:
+            return None
+        signal = self._replay_timeline.numerics.get(name.upper())
+        values = None if signal is None else signal.values
+        if values is None or len(values) == 0:
+            return None
+
+        sample_rate = float(signal.sample_rate_hz)
+        if not math.isfinite(sample_rate) or sample_rate <= 0:
+            return None
+        current_index = min(
+            int(math.floor(position_sec * sample_rate)),
+            len(values) - 1,
+        )
+        oldest_index = max(0, current_index - math.ceil(5.0 * sample_rate))
+        for index in range(current_index, oldest_index - 1, -1):
+            try:
+                value = float(values[index])
+            except (TypeError, ValueError):
+                continue
+            age_sec = position_sec - index / sample_rate
+            if math.isfinite(value):
+                return value if age_sec <= 5.0 + 1e-9 else None
+        return None
+
+    def _waveform_at(self, name: str, position_sec: float) -> float | None:
+        if self._replay_timeline is None:
+            return None
+        signal = self._replay_timeline.waveforms.get(name.lower())
+        if signal is None:
+            return None
+        samples = signal.window(position_sec + 1.0, 1.0, 1.0)
+        value = float(samples[-1])
+        return value if math.isfinite(value) else None
+
+    def _refresh_real_replay(self) -> None:
+        session = self._replay_session
+        timeline = self._replay_timeline
+        if session is None or timeline is None:
+            return
+
+        position = session.position_sec
+        self.real_replay_panel.set_position(position, timeline.duration_sec)
+        values = {
+            "HR": self._numeric_at("HR", position),
+            "SPO2": self._numeric_at("SPO2", position),
+            "SBP": self._numeric_at("SBP", position),
+            "DBP": self._numeric_at("DBP", position),
+            "MAP": self._numeric_at("MAP", position),
+            "RR": self._numeric_at("RR", position),
+            "ETCO2": self._numeric_at("ETCO2", position),
+        }
+        if values["ETCO2"] is None:
+            values["ETCO2"] = self._numeric_at("ETCO2_UC05", position)
+        values = sanitize_recorded_vitals(values)
+        self.real_replay_panel.set_recorded_vitals(values)
+        self.monitor.show_recorded_vitals({
+            "hr": values["HR"],
+            "spo2": values["SPO2"],
+            "sbp": values["SBP"],
+            "dbp": values["DBP"],
+            "map": values["MAP"],
+            "rr": values["RR"],
+            "etco2": values["ETCO2"],
+            "awp": self._waveform_at("awp", position),
+        })
+
+        hours = int(position // 3600)
+        minutes = int(position % 3600 // 60)
+        seconds = int(position % 60)
+        self.clock_label.setText(f"{hours:02d}:{minutes:02d}:{seconds:02d}")
+        self._maybe_run_inference(position)
+
+    def _maybe_run_inference(self, position_sec: float) -> None:
+        if self._replay_timeline is None or position_sec < 300.0:
+            return
+        if self.real_replay_panel.position_slider.isSliderDown():
+            return
+        stride = int(position_sec // 30.0) * 30
+        if stride <= self._last_inference_stride:
+            return
+        self._last_inference_stride = stride
+        worker = InferenceWorker(
+            self._inference_runner,
+            self._replay_timeline,
+            stride,
+            self._replay_generation,
+            parent=self,
+        )
+        self._inference_workers.append(worker)
+        worker.predictions_ready.connect(self._on_inference_ready)
+        worker.failed.connect(self._on_inference_failed)
+        worker.finished.connect(lambda current=worker: self._inference_finished(current))
+        self.real_replay_panel.set_inference_busy(True)
+        worker.start()
+
+    def _on_inference_ready(self, predictions, at_sec: float, generation: int) -> None:
+        if generation != self._replay_generation or self._replay_session is None:
+            return
+        self.real_replay_panel.set_predictions(predictions)
+
+    def _on_inference_failed(self, message: str, at_sec: float, generation: int) -> None:
+        if generation != self._replay_generation or self._replay_session is None:
+            return
+        self.real_replay_panel.model_results_label.setText(
+            f"Inference error at case time {at_sec:.0f}s: {message}"
+        )
+
+    def _inference_finished(self, worker: InferenceWorker) -> None:
+        if worker in self._inference_workers:
+            self._inference_workers.remove(worker)
+        worker.deleteLater()
+        busy = any(
+            current.isRunning() and current.generation == self._replay_generation
+            for current in self._inference_workers
+        )
+        self.real_replay_panel.set_inference_busy(busy)
+
     def _build_header(self) -> QFrame:
         header = QFrame(objectName="header")
         header.setFixedHeight(56)
@@ -766,6 +1039,7 @@ class MainWindow(QMainWindow):
         """Connect the panel to the simulation and start the sweep."""
         self._state = state
         self._buffer = buffer
+        self._synthetic_buffer = buffer
         self._generator = generator
         self.analyzer = VitalsAnalyzer(buffer.sample_rate)
         self.player = ScenarioPlayer(state)
@@ -897,6 +1171,9 @@ class MainWindow(QMainWindow):
     # -- vitals and alarms -----------------------------------------------------------
     def refresh_vitals(self) -> None:
         """Twice a second: scenario, numerics, vital-sign alarms, log, clock."""
+        if self._replay_session is not None:
+            self._refresh_real_replay()
+            return
         if self._state is None or self.analyzer is None:
             return
         now = time.monotonic()
@@ -997,20 +1274,21 @@ class MainWindow(QMainWindow):
 
     # -- export -------------------------------------------------------------------------
     def _ask_export_path(self) -> str:
-        default = f"ecg_sim_{datetime.now():%Y%m%d_%H%M%S}.csv"
+        default = f"ecg_sim_{datetime.now().astimezone():%Y%m%d_%H%M%S}.csv"
         path, _ = QFileDialog.getSaveFileName(
             self, "Export buffer to CSV", default, "CSV files (*.csv);;All files (*)")
         return path
 
     def export_buffer(self) -> str | None:
-        """Dump the current buffer.  Returns the path written, or None."""
-        if self._buffer is None:
+        """Dump the currently displayed source buffer. Returns the path or None."""
+        buffer = self._replay_buffer if self._replay_session is not None else self._buffer
+        if buffer is None:
             return None
         path = self.choose_export_path()
         if not path:
             return None
         try:
-            rows = self._buffer.to_csv(path)
+            rows = buffer.to_csv(path)
         except OSError as exc:
             self.controls.set_status(f"Export failed: {exc}")
             return None
@@ -1020,13 +1298,17 @@ class MainWindow(QMainWindow):
 
     # -- lifecycle ------------------------------------------------------------------------
     def closeEvent(self, event) -> None:
-        """Stop the timers and join the producer before the window goes away.
-
-        Without this the interpreter can tear down while the QThread is still
-        writing into the buffer, which Qt reports as a crash on exit.
-        """
+        """Stop timers and join the producer and replay workers before closing."""
         self._vitals_timer.stop()
         self._alarm_timer.stop()
+        self._replay_pump_timer.stop()
+        self._replay_generation += 1
+        self.real_replay_panel.stop()
+        for worker in tuple(self._inference_workers):
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait()
+        self._inference_workers.clear()
         self.monitor.stop()
         if self._generator is not None:
             self._generator.stop()

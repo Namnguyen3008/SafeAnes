@@ -16,7 +16,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from PyQt6.QtGui import QShortcut                         # noqa: E402
+from PyQt6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PyQt6.QtGui import QShortcut, QWheelEvent  # noqa: E402
 from PyQt6.QtWidgets import QApplication                  # noqa: E402
 
 from core.pathology import RESP_SPECS, RHYTHMS            # noqa: E402
@@ -248,6 +249,42 @@ def test_panel_scrolls_rather_than_clipping_on_a_short_window():
         assert window.controls.height() >= window.controls_pane.viewport().height()
         assert window.controls_pane.verticalScrollBar().maximum() > 0, (
             "panel is taller than the window but cannot be scrolled")
+    finally:
+        window.close()
+
+
+def test_replay_waveform_rows_scroll_to_the_bottom():
+    window = MainWindow()
+    window.resize(1480, 900)
+    window.monitor.set_replay_mode(True)
+    window.show()
+    APP.processEvents()
+    try:
+        scroll = window.monitor.waveform_scroll
+        bar = scroll.verticalScrollBar()
+        assert bar.maximum() > 0, "replay rows are clipped without a vertical scroll range"
+        bar.setValue(bar.maximum())
+        APP.processEvents()
+        awp = window.monitor.row_widgets["awp"]
+        awp_top = awp.mapTo(scroll.viewport(), awp.rect().topLeft()).y()
+        assert 0 <= awp_top < scroll.viewport().height(), "the AWP row cannot be brought into view"
+
+        bar.setValue(0)
+        plot_view = window.monitor.plots["ecg"].viewport()
+        point = QPointF(plot_view.rect().center())
+        wheel = QWheelEvent(
+            point,
+            QPointF(plot_view.mapToGlobal(point.toPoint())),
+            QPoint(0, 0),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(plot_view, wheel)
+        APP.processEvents()
+        assert bar.value() > 0, "mouse wheel over a waveform did not scroll the replay rows"
     finally:
         window.close()
 

@@ -19,3 +19,9 @@ venv/
 Thumbs.db
 .vscode/
 .idea/
+
+# WebUI / Node
+node_modules/
+*.tsbuildinfo
+.playwright-mcp/
+
