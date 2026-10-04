@@ -6,11 +6,11 @@ const FALLBACK_RANGES: Record<string, [number, number]> = {
   ecg: [-1.2, 2.2],
   ppg: [-0.3, 1.6],
   pleth: [-0.3, 1.6],
-  art: [0, 240],
-  abp: [0, 240],
-  capno: [0, 80],
-  co2: [0, 80],
-  awp: [0, 100],
+  art: [0, 160],
+  abp: [0, 160],
+  capno: [0, 100],
+  co2: [0, 100],
+  awp: [-20, 120],
   flow: [-1, 1],
   resp: [-1.5, 1.5],
 };
@@ -37,6 +37,16 @@ interface WaveformTraceProps {
   emptyMessage?: string;
 }
 
+function getPercentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const idx = (sorted.length - 1) * p;
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  const weight = idx - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
 function getRange(
   name: string,
   range: [number, number] | null | undefined,
@@ -45,19 +55,36 @@ function getRange(
   if (range && Number.isFinite(range[0]) && Number.isFinite(range[1]) && range[1] > range[0]) {
     return range;
   }
-  // Auto-compute a tight range from actual sample data (10% padding) when display_range is missing
+  const lname = name.toLowerCase();
+  // Robust 1% - 99% percentile scaling matching desktop monitor (with 5% padding & non-negative filtering)
   if (samples && samples.length > 0) {
-    const finite = samples.filter((s): s is number => s !== null && Number.isFinite(s));
-    if (finite.length >= 2) {
-      const lo = Math.min(...finite);
-      const hi = Math.max(...finite);
-      if (hi > lo) {
-        const pad = (hi - lo) * 0.10;
-        return [lo - pad, hi + pad];
+    let finite = samples.filter((s): s is number => s !== null && Number.isFinite(s));
+    if (lname === "art" || lname === "abp" || lname === "co2" || lname === "capno") {
+      finite = finite.filter((s) => s >= 0);
+    }
+    if (finite.length >= 4) {
+      const sorted = [...finite].sort((a, b) => a - b);
+      let low = getPercentile(sorted, 0.01);
+      let high = getPercentile(sorted, 0.99);
+      const span = high - low;
+      if (span <= 1e-6) {
+        const padding = Math.max(Math.abs((high + low) * 0.5) * 0.1, 1.0);
+        low -= padding;
+        high += padding;
+      } else {
+        const padding = Math.max(span * 0.05, 0.05);
+        low -= padding;
+        high += padding;
+      }
+      if (lname === "art" || lname === "abp" || lname === "co2" || lname === "capno") {
+        low = Math.max(0, low);
+      }
+      if (high > low) {
+        return [Number(low.toFixed(2)), Number(high.toFixed(2))];
       }
     }
   }
-  return FALLBACK_RANGES[name.toLowerCase()] ?? [-1, 1];
+  return FALLBACK_RANGES[lname] ?? [-1, 1];
 }
 
 function niceStep(value: number): number {
