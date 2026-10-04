@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 
@@ -356,7 +356,11 @@ class VitalDBSource:
         except ImportError as exc:
             raise RuntimeError("VitalDB replay requires the optional 'vitaldb' package") from exc
         base_url = (getattr(vitaldb.api, "API_URL", None) or "https://api.vitaldb.net").rstrip("/")
-        with urlopen(f"{base_url}/cases", timeout=30) as response:
+        req = Request(
+            f"{base_url}/cases",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+        )
+        with urlopen(req, timeout=30) as response:
             body = response.read()
             encoding = getattr(response, "headers", {}).get("Content-Encoding", "").lower()
         if encoding == "gzip" or body[:2] == b"\x1f\x8b":
