@@ -1,4 +1,5 @@
-# Verified against Python 3.12+ on Render & Windows.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0.0
 numpy>=1.25
 scipy>=1.10
 pandas>=2.0
